@@ -1,12 +1,30 @@
 use std::{fs, io};
-use std::io::Write;
+
+const FONT_SET: [u8; 80] = [
+    0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
+    0x20, 0x60, 0x20, 0x20, 0x70, // 1
+    0xF0, 0x10, 0xF0, 0x80, 0xF0, // 2
+    0xF0, 0x10, 0xF0, 0x10, 0xF0, // 3
+    0x90, 0x90, 0xF0, 0x10, 0x10, // 4
+    0xF0, 0x80, 0xF0, 0x10, 0xF0, // 5
+    0xF0, 0x80, 0xF0, 0x90, 0xF0, // 6
+    0xF0, 0x10, 0x20, 0x40, 0x40, // 7
+    0xF0, 0x90, 0xF0, 0x90, 0xF0, // 8
+    0xF0, 0x90, 0xF0, 0x10, 0xF0, // 9
+    0xF0, 0x90, 0xF0, 0x90, 0x90, // A
+    0xE0, 0x90, 0xE0, 0x90, 0xE0, // B
+    0xF0, 0x80, 0x80, 0x80, 0xF0, // C
+    0xE0, 0x90, 0x90, 0x90, 0xE0, // D
+    0xF0, 0x80, 0xF0, 0x80, 0xF0, // E
+    0xF0, 0x80, 0xF0, 0x80, 0x80  // F
+];
 
 struct Chip8 {
     i: u16,
     pc: u16,
     v: [u8; 16],
     memory: [u8; 4096],
-    frame_buffer: [u8; 64 * 32/ 8],
+    vram: [[u8; 8]; 32],
 }
 
 fn main() -> io::Result<()> {
@@ -14,14 +32,17 @@ fn main() -> io::Result<()> {
 
     let mut chip = Chip8 {
         i: 0,
-        pc: 64,
+        pc: 0x200,
         v: [0; 16],
         memory: [0; 4096],
-        frame_buffer: [0; 64 * 32 / 8],
+        vram: [[0; 8]; 32],
     };
 
+    // Load Font into memory
+    chip.memory[0..FONT_SET.len()].copy_from_slice(&FONT_SET);
+
     // Load Rom into memory
-    chip.memory[64..(rom.len() + 64)].copy_from_slice(&rom[..]);
+    chip.memory[0x200..(rom.len() + 0x200)].copy_from_slice(&rom);
 
     chip.run();
 
@@ -48,10 +69,10 @@ impl Chip8 {
             (opcode & 0x000F) as u8,
         );
 
-        let x = nibbles.1;
-        let y = nibbles.2;
+        let x = nibbles.1 as usize;
+        let y = nibbles.2 as usize;
         let n = nibbles.3;
-        let nn = (opcode & 0x0FF0) as u8;
+        let nn = (opcode & 0x00FF) as u8;
         let nnn = opcode & 0x0FFF;
 
         match nibbles {
@@ -61,7 +82,6 @@ impl Chip8 {
             (0x7, _, _, _) => self.op_7xnn(x, nn),
             (0xA, _, _, _) => self.op_annn(nnn),
             (0xD, _, _, _) => self.op_dxyn(x, y, n),
-            (0,0,0,0) => return 1,
             val => panic!("unimplemented instruction {:x?}", val),
         }
 
@@ -69,66 +89,58 @@ impl Chip8 {
     }
 
     fn op_00e0(&mut self) {
-        self.frame_buffer = [0; 64 * 32 /8];
+        self.vram = [[0; 8]; 32];
     }
 
     fn op_1nnn(&mut self, nnn: u16) {
         self.pc = nnn;
     }
 
-    fn op_6xnn(&mut self, x: u8, nn: u8) {
-        self.v[x as usize] = nn;
+    fn op_6xnn(&mut self, x: usize, nn: u8) {
+        self.v[x] = nn;
     }
 
-    fn op_7xnn(&mut self, x: u8, nn: u8) {
-        self.v[x as usize] += nn;
+    fn op_7xnn(&mut self, x: usize, nn: u8) {
+        self.v[x] += nn;
     }
 
     fn op_annn(&mut self, nnn: u16) {
         self.i = nnn;
     }
 
-    fn op_dxyn(&mut self, x: u8, y: u8, n: u8) {
-        let mut x_pos = self.v[x as usize] as usize & 64;
-        let mut y_pos = self.v[y as usize] as usize & 31;
+    fn op_dxyn(&mut self, x: usize, y: usize, n: u8) {
+        let x_pos = self.v[x] as usize % 8;
+        let mut y_pos = self.v[y] as usize % 32;
         self.v[0xf] = 0;
 
-        for i in 0..n {
-            let data = self.memory[(self.i + i as u16) as usize];
-            if x_pos + (y_pos * 32) >= 256 {
-                continue;
+        for offset in 0..n {
+            let sprite_data = self.memory[(self.i + offset as u16) as usize];
+
+            if (self.vram[y_pos][x_pos] & sprite_data) != 0 {
+                self.v[0xf] = 1;
             }
-            self.frame_buffer[x_pos + (y_pos * 32)] ^= data;
-            x_pos += 1;
-            y_pos += 1;
-            if y_pos > 32 {
-                break;
-            }
+
+            self.vram[y_pos][x_pos] ^= sprite_data;
+            y_pos = (y_pos + 1) % 32;
         }
-        self.print_screen();
+
+        self.print_vram();
     }
 
-    fn print_screen(&self){
-        for y in 0..=32{
-            for x in 0..8 {
-                if x + (y * 32) >= 256 {
-                    continue;
-                }
-                let mut builder = String::new();
-                let bits = self.frame_buffer[x + (y * 32)];
-                // Loop over the bits
-                for d in 0..8 {
-                    let bit_state = bits & 1 << d as u8;
-                    if bit_state == 0 {
-                        builder += " ";
+    fn print_vram(&self) {
+        for row in &self.vram {
+            for &byte in row {
+                for bit in 0..8 {
+                    // Extract each bit from the byte, starting with the most significant bit (leftmost pixel)
+                    let pixel = (byte >> (7 - bit)) & 1;
+                    if pixel == 1 {
+                        print!("▀");  // Represent a set pixel with "#"
                     } else {
-                        builder += "█";
+                        print!(" ");  // Represent an unset pixel with a space
                     }
                 }
-                print!("{}", builder);
             }
-            println!();
-            io::stdout().flush().unwrap();
+            println!(); // Move to the next line after each row
         }
     }
 }
