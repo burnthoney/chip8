@@ -23,7 +23,7 @@ struct Chip8 {
     i: u16,
     pc: u16,
     v: [u8; 16],
-    memory: [u8; 4096],
+    ram: [u8; 4096],
     vram: [[u8; 8]; 32],
 }
 
@@ -34,15 +34,15 @@ fn main() -> io::Result<()> {
         i: 0,
         pc: 0x200,
         v: [0; 16],
-        memory: [0; 4096],
+        ram: [0; 4096],
         vram: [[0; 8]; 32],
     };
 
     // Load Font into memory
-    chip.memory[0..FONT_SET.len()].copy_from_slice(&FONT_SET);
+    chip.ram[0..FONT_SET.len()].copy_from_slice(&FONT_SET);
 
     // Load Rom into memory
-    chip.memory[0x200..(rom.len() + 0x200)].copy_from_slice(&rom);
+    chip.ram[0x200..(rom.len() + 0x200)].copy_from_slice(&rom);
 
     chip.run();
 
@@ -52,8 +52,8 @@ fn main() -> io::Result<()> {
 impl Chip8 {
     fn run(&mut self) {
         loop {
-            let opcode = (self.memory[self.pc as usize] as u16) << 8
-                | self.memory[(self.pc+1) as usize] as u16;
+            let opcode = (self.ram[self.pc as usize] as u16) << 8
+                | self.ram[(self.pc+1) as usize] as u16;
             self.pc += 2;
             if self.parse_instruction(opcode) == 1 {
                 break;
@@ -114,7 +114,7 @@ impl Chip8 {
         self.v[0xf] = 0;
 
         for offset in 0..n {
-            let sprite_data = self.memory[(self.i + offset as u16) as usize];
+            let sprite_data = self.ram[(self.i + offset as u16) as usize];
 
             if (self.vram[y_pos][x_pos] & sprite_data) != 0 {
                 self.v[0xf] = 1;
