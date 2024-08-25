@@ -35,22 +35,11 @@ struct Chip8 {
     sound_timer: u8,
     delay_timer: u8,
     vram: [[u8; WINDOW_WIDTH / 8]; WINDOW_HEIGHT],
+    window: Window,
 }
 
 fn main() -> io::Result<()> {
-    let rom = fs::read("roms/IBM Logo.ch8")?;
-
-    let mut chip = Chip8 {
-        i: 0,
-        pc: 0x200,
-        sp: 0,
-        v: [0; 16],
-        ram: [0; 4096],
-        stack: [0; 16],
-        sound_timer: 0,
-        delay_timer: 0,
-        vram: [[0; WINDOW_WIDTH / 8]; WINDOW_HEIGHT],
-    };
+    let rom = fs::read("roms/4-flags.ch8")?;
 
     let window_options = WindowOptions {
         scale: Scale::X16,
@@ -66,6 +55,20 @@ fn main() -> io::Result<()> {
 
     window.set_target_fps(60);
 
+    let mut chip = Chip8 {
+        i: 0,
+        pc: 0x200,
+        sp: 0,
+        v: [0; 16],
+        ram: [0; 4096],
+        stack: [0; 16],
+        sound_timer: 0,
+        delay_timer: 0,
+        vram: [[0; WINDOW_WIDTH / 8]; WINDOW_HEIGHT],
+        window
+    };
+
+
 
     // Load Font into memory
     chip.ram[0..FONT_SET.len()].copy_from_slice(&FONT_SET);
@@ -73,9 +76,16 @@ fn main() -> io::Result<()> {
     // Load Rom into memory
     chip.ram[0x200..(rom.len() + 0x200)].copy_from_slice(&rom);
 
-    while window.is_open() && !window.is_key_down(Key::Escape){
+    while chip.window.is_open() && !chip.window.is_key_down(Key::Escape){
         chip.run();
-        window.update_with_buffer(&chip.vram_to_buffer(), 64, 32).unwrap();
+        chip.window.update_with_buffer(&chip.vram_to_buffer(), WINDOW_WIDTH, WINDOW_HEIGHT).unwrap();
+        if chip.delay_timer > 0 {
+            chip.delay_timer -= 1;
+        }
+        
+        if chip.sound_timer > 0{
+            chip.sound_timer -= 1;
+        }
     }
 
     Ok(())
@@ -86,10 +96,11 @@ impl Chip8 {
         let opcode =
             (self.ram[self.pc as usize] as u16) << 8 | self.ram[(self.pc + 1) as usize] as u16;
         self.pc += 2;
-        self.parse_instruction(opcode);
+        self.exec_opcode(opcode);
     }
 
-    fn parse_instruction(&mut self, opcode: u16) {
+    fn exec_opcode(&mut self, opcode: u16) {
+
         let nibbles = (
             ((opcode & 0xF000) >> 12) as u8,
             ((opcode & 0x0F00) >> 8) as u8,
@@ -135,9 +146,10 @@ impl Chip8 {
             (0xF, _, 0x1, 0xE) => self.op_fx1e(x),
             (0xF, _, 0x0, 0xA) => self.op_fx0a(x),
             (0xF, _, 0x2, 0x9) => self.op_fx29(x),
+            (0xF, _, 0x3, 0x3) => self.op_fx33(x),
             (0xF, _, 0x5, 0x5) => self.op_fx55(x),
             (0xF, _, 0x6, 0x5) => self.op_fx65(x),
-            val => panic!("unimplemented instruction {:x?}", val),
+            _ => {},
         }
     }
 
@@ -147,7 +159,7 @@ impl Chip8 {
 
     fn op_00ee(&mut self) {
         self.pc = self.stack[self.sp as usize];
-        self.sp -= 2;
+        self.sp -= 1;
     }
 
     fn op_1nnn(&mut self, nnn: u16) {
@@ -155,15 +167,15 @@ impl Chip8 {
     }
 
     fn op_2nnn(&mut self, nnn: u16){
-        self.stack[self.sp as usize] = nnn;
-        self.sp += 2;
+        self.stack[self.sp as usize] = self.pc + 2;
+        self.sp += 1;
+        self.pc = nnn;
     }
 
     fn op_3xnn(&mut self, x: usize, nn: u8){
         if self.v[x] == nn {
             self.pc += 2;
         }
-
     }
 
     fn op_4xnn(&mut self, x: usize, nn: u8){
@@ -184,7 +196,7 @@ impl Chip8 {
     }
 
     fn op_7xnn(&mut self, x: usize, nn: u8) {
-        self.v[x] += nn;
+        self.v[x] = self.v[x].wrapping_add(nn);
     }
 
     fn op_8xy0(&mut self, x: usize, y: usize){
@@ -205,7 +217,8 @@ impl Chip8 {
         self.v[0xf] = if overflow {1} else {0};
     }
     fn op_8xy5(&mut self, x: usize, y: usize){
-        self.v[x] -= self.v[y];
+        self.v[0xf] = if self.v[x] > self.v[y] {1} else {0};
+        self.v[x] = self.v[x].wrapping_sub(self.v[y]);
     }
     fn op_8xy6(&mut self, x: usize, y: usize){
         self.v[x] = self.v[y];
@@ -213,7 +226,8 @@ impl Chip8 {
         self.v[x] >>= 1;
     }
     fn op_8xy7(&mut self, x: usize, y: usize){
-        self.v[x] = self.v[y] - self.v[x];
+        self.v[0xf] = if self.v[y] > self.v[x] { 1 } else { 0 };
+        self.v[x] = self.v[y].wrapping_sub(self.v[x]);
     }
     fn op_8xye(&mut self, x: usize, y: usize){
         self.v[x] = self.v[y];
@@ -236,7 +250,7 @@ impl Chip8 {
     }
 
     fn op_cxnn(&mut self, x: usize, nn: u8) {
-        self.v[x] &= rand::thread_rng().gen_range(0..nn);
+        self.v[x] = rand::thread_rng().gen::<u8>() & nn;
     }
 
     fn op_dxyn(&mut self, x: usize, y: usize, n: u8) {
@@ -264,10 +278,20 @@ impl Chip8 {
     }
 
     fn op_ex9e(&mut self, x: usize){
-        todo!()
+        let key = self.map_key(self.v[x]);
+        if let Some(key) = key{
+            if self.window.is_key_down(key) {
+                self.pc += 2;
+            }
+        }
     }
     fn op_exa1(&mut self, x: usize){
-        todo!()
+        let key = self.map_key(self.v[x]);
+        if let Some(key) = key{
+            if !self.window.is_key_down(key) {
+                self.pc += 2;
+            }
+        }
     }
 
     fn op_fx07(&mut self, x: usize){
@@ -281,51 +305,74 @@ impl Chip8 {
     }
     fn op_fx1e(&mut self, x: usize){
         self.i += self.v[x] as u16;
-        if self.i > 0x1000 {
-            self.v[0xf] = 1;
-        }
     }
 
     fn op_fx0a(&mut self, x: usize){
-        self.pc -= 2;
-        todo!()
-    }
-
-    fn op_fx29(&mut self, x: usize){
-        match x {
-            0x0 => self.i =  0,
-            0x1 => self.i =  5,
-            0x2 => self.i =  10,
-            0x3 => self.i =  15,
-            0x4 => self.i =  20,
-            0x5 => self.i =  25,
-            0x6 => self.i =  30,
-            0x7 => self.i =  35,
-            0x8 => self.i =  40,
-            0x9 => self.i =  45,
-            0xA => self.i =  50,
-            0xB => self.i =  55,
-            0xC => self.i =  60,
-            0xD => self.i =  65,
-            0xE => self.i =  70,
-            0xF => self.i =  75,
-            _ => {}
+        let mut is_pressed = false;
+        for key_index in 0..16 {
+            if let Some(key) = self.map_key(key_index){
+                if self.window.is_key_down(key) {
+                    is_pressed = true;
+                    self.v[x] = key_index;
+                }
+            }
+        }
+        if !is_pressed {
+            self.pc -= 2;
         }
     }
 
+    fn op_fx29(&mut self, x: usize){
+        self.i = self.v[x] as u16 * 5;
+    }
+
+    fn op_fx33(&mut self, x: usize){
+        let mut remainder = self.v[x];
+        let hundredth = remainder / 100;
+        remainder %= 100;
+        let tens = remainder / 10;
+        remainder %= 10;
+        let ones = remainder;
+        self.ram[self.i as usize] = hundredth;
+        self.ram[self.i as usize + 1] = tens;
+        self.ram[self.i as usize + 2] = ones;
+    }
+
     fn op_fx55(&mut self, x: usize){
-        for offset in 0..self.v[x] {
-            self.ram[(self.i + offset as u16) as usize] = self.v[offset as usize];
+        for offset in 0..x {
+            self.ram[(self.i + offset as u16) as usize] = self.v[offset];
         }
     }
 
     fn op_fx65(&mut self, x: usize){
-        for offset in 0..self.v[x] {
-            self.v[offset as usize] = self.ram[(self.i + offset as u16) as usize];
+        for offset in 0..x {
+            self.v[offset] = self.ram[(self.i + offset as u16) as usize];
         }
     }
 
 
+    fn map_key(&self, key: u8) -> Option<Key> {
+        dbg!(key);
+        match key {
+            0x0 => Some(Key::Key1),
+            0x1 => Some(Key::Key2),
+            0x2 => Some(Key::Key3),
+            0x3 => Some(Key::Key4),
+            0x4 => Some(Key::Q),
+            0x5 => Some(Key::W),
+            0x6 => Some(Key::E),
+            0x7 => Some(Key::R),
+            0x8 => Some(Key::A),
+            0x9 => Some(Key::S),
+            0xA => Some(Key::D),
+            0xB => Some(Key::F),
+            0xC => Some(Key::Z),
+            0xD => Some(Key::X),
+            0xE => Some(Key::C),
+            0xF => Some(Key::V),
+            _ => None,
+        }
+    }
 
     fn vram_to_buffer(&self) -> Vec<u32> {
         let mut buffer = vec![0; WINDOW_WIDTH * WINDOW_HEIGHT];
