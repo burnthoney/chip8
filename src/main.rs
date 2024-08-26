@@ -1,5 +1,7 @@
 use minifb::{Key, Scale, Window, WindowOptions};
 use std::{fs, io};
+use std::thread::sleep;
+use std::time::Duration;
 use rand::random;
 
 const FONT_SET: [u8; 80] = [
@@ -36,6 +38,7 @@ struct Chip8 {
     delay_timer: u8,
     vram: [[u8; WINDOW_WIDTH / 8]; WINDOW_HEIGHT],
     window: Window,
+    is_dirty: bool,
 }
 
 fn main() -> io::Result<()> {
@@ -46,14 +49,12 @@ fn main() -> io::Result<()> {
         ..WindowOptions::default()
     };
 
-    let mut window = Window::new(
+    let window = Window::new(
         "Chip8",
         WINDOW_WIDTH,
         WINDOW_HEIGHT,
         window_options
     ).unwrap_or_else(|e| panic!("{}", e));
-
-    window.set_target_fps(60);
 
     let mut chip = Chip8 {
         i: 0,
@@ -65,7 +66,8 @@ fn main() -> io::Result<()> {
         sound_timer: 0,
         delay_timer: 0,
         vram: [[0; WINDOW_WIDTH / 8]; WINDOW_HEIGHT],
-        window
+        window,
+        is_dirty: true
     };
 
 
@@ -77,7 +79,11 @@ fn main() -> io::Result<()> {
     chip.ram[0x200..(rom.len() + 0x200)].copy_from_slice(&rom);
 
     while chip.window.is_open() && !chip.window.is_key_down(Key::Escape){
-        chip.run();
+        for _ in 0..8 {
+            chip.cycle()
+        }
+
+        chip.window.update_with_buffer(&chip.vram_to_buffer(), WINDOW_WIDTH, WINDOW_HEIGHT).unwrap();
 
         if chip.delay_timer > 0 {
             chip.delay_timer -= 1;
@@ -92,12 +98,12 @@ fn main() -> io::Result<()> {
 }
 
 impl Chip8 {
-    fn run(&mut self) {
-        self.window.update_with_buffer(&self.vram_to_buffer(), WINDOW_WIDTH, WINDOW_HEIGHT).unwrap();
+    fn cycle(&mut self) {
         let opcode =
             (self.ram[self.pc as usize] as u16) << 8 | self.ram[(self.pc + 1) as usize] as u16;
         self.pc += 2;
         self.exec_opcode(opcode);
+        sleep(Duration::from_millis(2))
     }
 
     fn exec_opcode(&mut self, opcode: u16) {
@@ -156,6 +162,7 @@ impl Chip8 {
 
     fn op_00e0(&mut self) {
         self.vram = [[0; 8]; 32];
+        self.is_dirty = true;
     }
 
     fn op_00ee(&mut self) {
@@ -280,16 +287,18 @@ impl Chip8 {
 
             y_pos = (y_pos + 1) % WINDOW_HEIGHT;
         }
+
+        self.is_dirty = true;
     }
 
     fn op_ex9e(&mut self, x: usize){
         let state = self.poll_keyboard();
-        if state[x] {self.pc += 2}
+        if state[self.v[x] as usize] {self.pc += 2}
     }
 
     fn op_exa1(&mut self, x: usize){
         let state = self.poll_keyboard();
-        if !state[x] {self.pc += 2}
+        if !state[self.v[x] as usize] {self.pc += 2}
     }
 
     fn op_fx07(&mut self, x: usize){
@@ -306,8 +315,12 @@ impl Chip8 {
     }
 
     fn op_fx0a(&mut self, x: usize){
-        let state = self.poll_keyboard();
-        if !state[x] {
+        let states = self.poll_keyboard();
+
+        if let Some(i) = states.iter().position(|&state| state) {
+            self.v[x] = i as u8;
+            dbg!(i);
+        } else {
             self.pc -= 2;
         }
     }
@@ -340,46 +353,24 @@ impl Chip8 {
         }
     }
 
-    fn map_key(&self, key: u8) -> Option<Key> {
-        match key {
-            0x0 => Some(Key::Key1),
-            0x1 => Some(Key::Key2),
-            0x2 => Some(Key::Key3),
-            0x3 => Some(Key::Key4),
-            0x4 => Some(Key::Q),
-            0x5 => Some(Key::W),
-            0x6 => Some(Key::E),
-            0x7 => Some(Key::R),
-            0x8 => Some(Key::A),
-            0x9 => Some(Key::S),
-            0xA => Some(Key::D),
-            0xB => Some(Key::F),
-            0xC => Some(Key::Z),
-            0xD => Some(Key::X),
-            0xE => Some(Key::C),
-            0xF => Some(Key::V),
-            _ => None,
-        }
-    }
-
     fn poll_keyboard(&self) -> [bool; 16] {
         let mut state = [false; 16];
 
-        if self.window.is_key_down(Key::Key1) { state[0x0] = true};
-        if self.window.is_key_down(Key::Key2) { state [0x1] = true};
-        if self.window.is_key_down(Key::Key3) { state [0x2] = true};
-        if self.window.is_key_down(Key::Key4) { state [0x3] = true};
+        if self.window.is_key_down(Key::Key1) { state[0x1] = true};
+        if self.window.is_key_down(Key::Key2) { state [0x2] = true};
+        if self.window.is_key_down(Key::Key3) { state [0x3] = true};
+        if self.window.is_key_down(Key::Key4) { state [0xC] = true};
         if self.window.is_key_down(Key::Q) { state [0x4] = true};
         if self.window.is_key_down(Key::W) { state [0x5] = true};
         if self.window.is_key_down(Key::E) { state [0x6] = true};
-        if self.window.is_key_down(Key::R) { state [0x7] = true};
-        if self.window.is_key_down(Key::A) { state [0x8] = true};
-        if self.window.is_key_down(Key::S) { state [0x9] = true};
-        if self.window.is_key_down(Key::D) { state [0xA] = true};
-        if self.window.is_key_down(Key::F) { state [0xB] = true};
-        if self.window.is_key_down(Key::Z) { state [0xC] = true};
-        if self.window.is_key_down(Key::X) { state [0xD] = true};
-        if self.window.is_key_down(Key::C) { state [0xE] = true};
+        if self.window.is_key_down(Key::R) { state [0xD] = true};
+        if self.window.is_key_down(Key::A) { state [0x7] = true};
+        if self.window.is_key_down(Key::S) { state [0x8] = true};
+        if self.window.is_key_down(Key::D) { state [0x9] = true};
+        if self.window.is_key_down(Key::F) { state [0xE] = true};
+        if self.window.is_key_down(Key::Z) { state [0xA] = true};
+        if self.window.is_key_down(Key::X) { state [0x0] = true};
+        if self.window.is_key_down(Key::C) { state [0xB] = true};
         if self.window.is_key_down(Key::V) { state [0xF] = true};
 
         state
