@@ -1,7 +1,7 @@
 use minifb::{Key, Scale, Window, WindowOptions};
-use std::{fs, io};
+use std::{fs, io, time};
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use rand::random;
 
 const FONT_SET: [u8; 80] = [
@@ -42,7 +42,7 @@ struct Chip8 {
 }
 
 fn main() -> io::Result<()> {
-    let rom = fs::read("roms/6-keypad.ch8")?;
+    let rom = fs::read("roms/tetris.rom")?;
 
     let window_options = WindowOptions {
         scale: Scale::X16,
@@ -70,27 +70,44 @@ fn main() -> io::Result<()> {
         is_dirty: true
     };
 
-
-
     // Load Font into memory
     chip.ram[0..FONT_SET.len()].copy_from_slice(&FONT_SET);
 
     // Load Rom into memory
     chip.ram[0x200..(rom.len() + 0x200)].copy_from_slice(&rom);
 
+    let instruction_duration = Duration::from_millis(1);
+    let timer_duration = Duration::from_millis(16);
+
+    let mut last_instruction_time = Instant::now();
+    let mut last_timer_update = Instant::now();
+
     while chip.window.is_open() && !chip.window.is_key_down(Key::Escape){
-        for _ in 0..8 {
-            chip.cycle()
+
+        chip.cycle();
+
+        if chip.is_dirty {
+            chip.window.update_with_buffer(&chip.vram_to_buffer(), WINDOW_WIDTH, WINDOW_HEIGHT).unwrap();
+            chip.is_dirty = false;
+        } else {
+            chip.window.update();
         }
 
-        chip.window.update_with_buffer(&chip.vram_to_buffer(), WINDOW_WIDTH, WINDOW_HEIGHT).unwrap();
-
-        if chip.delay_timer > 0 {
-            chip.delay_timer -= 1;
+        let elapsed = last_instruction_time.elapsed();
+        if elapsed < instruction_duration {
+            sleep(instruction_duration - elapsed);
         }
+        last_instruction_time = Instant::now();
 
-        if chip.sound_timer > 0{
-            chip.sound_timer -= 1;
+        if last_timer_update.elapsed() > timer_duration {
+            if chip.delay_timer > 0 {
+                chip.delay_timer -= 1;
+            }
+
+            if chip.sound_timer > 0 {
+                chip.sound_timer -= 1;
+            }
+            last_timer_update = Instant::now();
         }
     }
 
