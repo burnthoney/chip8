@@ -1,6 +1,6 @@
 use minifb::{Key, Scale, Window, WindowOptions};
 use std::{fs, io};
-use rand::Rng;
+use rand::random;
 
 const FONT_SET: [u8; 80] = [
     0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
@@ -39,7 +39,7 @@ struct Chip8 {
 }
 
 fn main() -> io::Result<()> {
-    let rom = fs::read("roms/4-flags.ch8")?;
+    let rom = fs::read("roms/6-keypad.ch8")?;
 
     let window_options = WindowOptions {
         scale: Scale::X16,
@@ -78,11 +78,11 @@ fn main() -> io::Result<()> {
 
     while chip.window.is_open() && !chip.window.is_key_down(Key::Escape){
         chip.run();
-        chip.window.update_with_buffer(&chip.vram_to_buffer(), WINDOW_WIDTH, WINDOW_HEIGHT).unwrap();
+
         if chip.delay_timer > 0 {
             chip.delay_timer -= 1;
         }
-        
+
         if chip.sound_timer > 0{
             chip.sound_timer -= 1;
         }
@@ -93,6 +93,7 @@ fn main() -> io::Result<()> {
 
 impl Chip8 {
     fn run(&mut self) {
+        self.window.update_with_buffer(&self.vram_to_buffer(), WINDOW_WIDTH, WINDOW_HEIGHT).unwrap();
         let opcode =
             (self.ram[self.pc as usize] as u16) << 8 | self.ram[(self.pc + 1) as usize] as u16;
         self.pc += 2;
@@ -115,8 +116,8 @@ impl Chip8 {
         let nnn = opcode & 0x0FFF;
 
         match nibbles {
-            (0x0, _, 0xE, 0x0) => self.op_00e0(),
-            (0x0, _, 0xE, 0xE) => self.op_00ee(),
+            (0x0, 0x0, 0xE, 0x0) => self.op_00e0(),
+            (0x0, 0x0, 0xE, 0xE) => self.op_00ee(),
             (0x1, _, _, _) => self.op_1nnn(nnn),
             (0x2,_,_,_) => self.op_2nnn(nnn),
             (0x3,_,_,_) => self.op_3xnn(x, nn),
@@ -158,8 +159,8 @@ impl Chip8 {
     }
 
     fn op_00ee(&mut self) {
-        self.pc = self.stack[self.sp as usize];
         self.sp -= 1;
+        self.pc = self.stack[self.sp as usize];
     }
 
     fn op_1nnn(&mut self, nnn: u16) {
@@ -167,7 +168,7 @@ impl Chip8 {
     }
 
     fn op_2nnn(&mut self, nnn: u16){
-        self.stack[self.sp as usize] = self.pc + 2;
+        self.stack[self.sp as usize] = self.pc;
         self.sp += 1;
         self.pc = nnn;
     }
@@ -217,22 +218,26 @@ impl Chip8 {
         self.v[0xf] = if overflow {1} else {0};
     }
     fn op_8xy5(&mut self, x: usize, y: usize){
-        self.v[0xf] = if self.v[x] > self.v[y] {1} else {0};
-        self.v[x] = self.v[x].wrapping_sub(self.v[y]);
+        let (res, overflow) = self.v[x].overflowing_sub(self.v[y]);
+        self.v[x] = res;
+        self.v[0xf] = !overflow as u8;
     }
     fn op_8xy6(&mut self, x: usize, y: usize){
         self.v[x] = self.v[y];
-        self.v[0xf] = self.v[x] & 0x01;
+        let flag = self.v[x] & 0x1;
         self.v[x] >>= 1;
+        self.v[0xf] = flag;
     }
     fn op_8xy7(&mut self, x: usize, y: usize){
-        self.v[0xf] = if self.v[y] > self.v[x] { 1 } else { 0 };
-        self.v[x] = self.v[y].wrapping_sub(self.v[x]);
+        let (res, overflow) = self.v[y].overflowing_sub(self.v[x]);
+        self.v[x] = res;
+        self.v[0xf] = !overflow as u8;
     }
     fn op_8xye(&mut self, x: usize, y: usize){
         self.v[x] = self.v[y];
-        self.v[0xf] = (self.v[x] & 0x80) >> 7;
-        self.v[x] <<= 1
+        let flag = (self.v[x] & 0x80) >> 7;
+        self.v[x] <<= 1;
+        self.v[0xf] = flag;
     }
 
     fn op_9xy0(&mut self, x: usize, y: usize){
@@ -250,7 +255,7 @@ impl Chip8 {
     }
 
     fn op_cxnn(&mut self, x: usize, nn: u8) {
-        self.v[x] = rand::thread_rng().gen::<u8>() & nn;
+        self.v[x] = random::<u8>() & nn;
     }
 
     fn op_dxyn(&mut self, x: usize, y: usize, n: u8) {
@@ -278,20 +283,13 @@ impl Chip8 {
     }
 
     fn op_ex9e(&mut self, x: usize){
-        let key = self.map_key(self.v[x]);
-        if let Some(key) = key{
-            if self.window.is_key_down(key) {
-                self.pc += 2;
-            }
-        }
+        let state = self.poll_keyboard();
+        if state[x] {self.pc += 2}
     }
+
     fn op_exa1(&mut self, x: usize){
-        let key = self.map_key(self.v[x]);
-        if let Some(key) = key{
-            if !self.window.is_key_down(key) {
-                self.pc += 2;
-            }
-        }
+        let state = self.poll_keyboard();
+        if !state[x] {self.pc += 2}
     }
 
     fn op_fx07(&mut self, x: usize){
@@ -308,16 +306,8 @@ impl Chip8 {
     }
 
     fn op_fx0a(&mut self, x: usize){
-        let mut is_pressed = false;
-        for key_index in 0..16 {
-            if let Some(key) = self.map_key(key_index){
-                if self.window.is_key_down(key) {
-                    is_pressed = true;
-                    self.v[x] = key_index;
-                }
-            }
-        }
-        if !is_pressed {
+        let state = self.poll_keyboard();
+        if !state[x] {
             self.pc -= 2;
         }
     }
@@ -339,20 +329,18 @@ impl Chip8 {
     }
 
     fn op_fx55(&mut self, x: usize){
-        for offset in 0..x {
+        for offset in 0..=x {
             self.ram[(self.i + offset as u16) as usize] = self.v[offset];
         }
     }
 
     fn op_fx65(&mut self, x: usize){
-        for offset in 0..x {
+        for offset in 0..=x {
             self.v[offset] = self.ram[(self.i + offset as u16) as usize];
         }
     }
 
-
     fn map_key(&self, key: u8) -> Option<Key> {
-        dbg!(key);
         match key {
             0x0 => Some(Key::Key1),
             0x1 => Some(Key::Key2),
@@ -372,6 +360,29 @@ impl Chip8 {
             0xF => Some(Key::V),
             _ => None,
         }
+    }
+
+    fn poll_keyboard(&self) -> [bool; 16] {
+        let mut state = [false; 16];
+
+        if self.window.is_key_down(Key::Key1) { state[0x0] = true};
+        if self.window.is_key_down(Key::Key2) { state [0x1] = true};
+        if self.window.is_key_down(Key::Key3) { state [0x2] = true};
+        if self.window.is_key_down(Key::Key4) { state [0x3] = true};
+        if self.window.is_key_down(Key::Q) { state [0x4] = true};
+        if self.window.is_key_down(Key::W) { state [0x5] = true};
+        if self.window.is_key_down(Key::E) { state [0x6] = true};
+        if self.window.is_key_down(Key::R) { state [0x7] = true};
+        if self.window.is_key_down(Key::A) { state [0x8] = true};
+        if self.window.is_key_down(Key::S) { state [0x9] = true};
+        if self.window.is_key_down(Key::D) { state [0xA] = true};
+        if self.window.is_key_down(Key::F) { state [0xB] = true};
+        if self.window.is_key_down(Key::Z) { state [0xC] = true};
+        if self.window.is_key_down(Key::X) { state [0xD] = true};
+        if self.window.is_key_down(Key::C) { state [0xE] = true};
+        if self.window.is_key_down(Key::V) { state [0xF] = true};
+
+        state
     }
 
     fn vram_to_buffer(&self) -> Vec<u32> {
